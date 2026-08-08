@@ -1,0 +1,212 @@
+"""
+Duplicate Image Detector - Backend
+------------------------------------
+Detects EXACT duplicates (via MD5 hash) and NEAR duplicates
+(via perceptual hashing: pHash/dHash/aHash + Hamming distance).
+
+Run:
+    pip install -r requirements.txt
+    python app.py
+
+Server runs on http://localhost:5000
+"""
+
+import os
+import hashlib
+from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
+from PIL import Image
+import imagehash
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_FOLDER = os.path.join(BASE_DIR, "uploads")
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+app = Flask(__name__)
+CORS(app)  # allow the frontend (served from a different port/file) to call this API
+app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
+app.config["MAX_CONTENT_LENGTH"] = 50 * 1024 * 1024  # 50 MB total per request
+
+ALLOWED_EXT = {"png", "jpg", "jpeg", "gif", "bmp", "webp"}
+
+# ---- In-memory store (fine for a hackathon demo; swap for SQLite/Mongo if needed) ----
+IMAGES = []      # list of dicts: id, filename, original_name, md5, phash, dhash, ahash, url
+NEXT_ID = 1
+
+
+def allowed_file(filename):
+    return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXT
+
+
+def compute_hashes(filepath):
+    with open(filepath, "rb") as f:
+        data = f.read()
+    md5 = hashlib.md5(data).hexdigest()
+
+    img = Image.open(filepath).convert("RGB")
+    phash = str(imagehash.phash(img))
+    dhash = str(imagehash.dhash(img))
+    ahash = str(imagehash.average_hash(img))
+    return md5, phash, dhash, ahash
+
+
+def hamming_distance(hash1_hex, hash2_hex):
+    h1 = imagehash.hex_to_hash(hash1_hex)
+    h2 = imagehash.hex_to_hash(hash2_hex)
+    return h1 - h2  # ImageHash overrides subtraction to return Hamming distance
+
+
+@app.route("/api/health", methods=["GET"])
+def health():
+    return jsonify({"status": "ok", "total_images": len(IMAGES)})
+
+
+@app.route("/api/upload", methods=["POST"])
+def upload():
+    global NEXT_ID
+    if "images" not in request.files:
+        return jsonify({"error": "No 'images' field in the request"}), 400
+
+    files = request.files.getlist("images")
+    uploaded = []
+
+    for file in files:
+        if file.filename == "" or not allowed_file(file.filename):
+            continue
+
+        safe_name = f"{NEXT_ID}_{file.filename}"
+        filepath = os.path.join(app.config["UPLOAD_FOLDER"], safe_name)
+        file.save(filepath)
+
+        try:
+            md5, phash, dhash, ahash = compute_hashes(filepath)
+        except Exception:
+            os.remove(filepath)
+            continue
+
+        record = {
+            "id": NEXT_ID,
+            "filename": safe_name,
+            "original_name": file.filename,
+            "md5": md5,
+            "phash": phash,
+            "dhash": dhash,
+            "ahash": ahash,
+            "url": f"/uploads/{safe_name}",
+        }
+        IMAGES.append(record)
+        uploaded.append(record)
+        NEXT_ID += 1
+
+    return jsonify({"uploaded": uploaded, "count": len(uploaded)})
+
+
+@app.route("/uploads/<path:filename>")
+def serve_upload(filename):
+    return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
+
+
+@app.route("/api/images", methods=["GET"])
+def list_images():
+    return jsonify(IMAGES)
+
+
+@app.route("/api/analyze", methods=["GET"])
+def analyze():
+    """
+    Groups images into duplicate clusters using union-find.
+    Two images are linked if:
+      - their MD5 matches (byte-for-byte identical), OR
+      - their pHash Hamming distance <= threshold (visually similar / near-duplicate)
+    """
+    threshold = int(request.args.get("threshold", 8))  # 0 = only exact-looking, 10+ = looser
+
+    n = len(IMAGES)
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x, y):
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            parent[ry] = rx
+
+    pair_info = {}  # (i, j) -> {distance, exact, similarity}
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            img_i, img_j = IMAGES[i], IMAGES[j]
+            exact = img_i["md5"] == img_j["md5"]
+            dist = hamming_distance(img_i["phash"], img_j["phash"])
+            if exact or dist <= threshold:
+                union(i, j)
+                pair_info[(i, j)] = {
+                    "distance": dist,
+                    "exact": exact,
+                    "similarity": round((1 - dist / 64) * 100, 1),
+                }
+
+    groups = {}
+    for i in range(n):
+        root = find(i)
+        groups.setdefault(root, []).append(i)
+
+    result_groups = []
+    for root, members in groups.items():
+        if len(members) < 2:
+            continue
+
+        has_exact = False
+        max_similarity = 0
+        for a in range(len(members)):
+            for b in range(a + 1, len(members)):
+                key = (min(members[a], members[b]), max(members[a], members[b]))
+                info = pair_info.get(key)
+                if info:
+                    has_exact = has_exact or info["exact"]
+                    max_similarity = max(max_similarity, info["similarity"])
+
+        result_groups.append(
+            {
+                "images": [IMAGES[idx] for idx in members],
+                "has_exact_duplicate": has_exact,
+                "max_similarity": max_similarity,
+                "count": len(members),
+            }
+        )
+
+    # Exact duplicate groups first, then by similarity
+    result_groups.sort(key=lambda g: (-g["has_exact_duplicate"], -g["max_similarity"]))
+
+    grouped_ids = {img["id"] for g in result_groups for img in g["images"]}
+    unique_images = [img for img in IMAGES if img["id"] not in grouped_ids]
+
+    return jsonify(
+        {
+            "total_images": n,
+            "duplicate_groups": result_groups,
+            "unique_images": unique_images,
+            "total_duplicate_groups": len(result_groups),
+        }
+    )
+
+
+@app.route("/api/reset", methods=["POST"])
+def reset():
+    global IMAGES, NEXT_ID
+    for img in IMAGES:
+        try:
+            os.remove(os.path.join(app.config["UPLOAD_FOLDER"], img["filename"]))
+        except OSError:
+            pass
+    IMAGES = []
+    NEXT_ID = 1
+    return jsonify({"status": "reset"})
+
+
+if __name__ == "__main__":
+    app.run(debug=True, port=5000)
