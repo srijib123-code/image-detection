@@ -1,0 +1,168 @@
+const API_BASE = "http://localhost:5000";
+
+// Prevent Chrome from opening dropped images in a new tab
+window.addEventListener("dragover", (e) => e.preventDefault());
+window.addEventListener("drop", (e) => e.preventDefault());
+
+const dropZone = document.getElementById("dropZone");
+const fileInput = document.getElementById("fileInput");
+const analyzeBtn = document.getElementById("analyzeBtn");
+const resetBtn = document.getElementById("resetBtn");
+const thresholdSlider = document.getElementById("threshold");
+const thresholdValue = document.getElementById("thresholdValue");
+const statsEl = document.getElementById("stats");
+const loadingEl = document.getElementById("loading");
+const resultsEl = document.getElementById("results");
+const summaryEl = document.getElementById("summary");
+const groupsContainer = document.getElementById("groupsContainer");
+const uniqueContainer = document.getElementById("uniqueContainer");
+const uniqueTitle = document.getElementById("uniqueTitle");
+
+let totalImages = 0;
+
+// ---------- Upload interactions ----------
+
+dropZone.addEventListener("click", () => fileInput.click());
+
+dropZone.addEventListener("dragover", (e) => {
+  e.preventDefault();
+  dropZone.classList.add("dragover");
+});
+
+dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
+
+dropZone.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dropZone.classList.remove("dragover");
+  if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files);
+});
+
+fileInput.addEventListener("change", () => {
+  if (fileInput.files.length) uploadFiles(fileInput.files);
+});
+
+thresholdSlider.addEventListener("input", () => {
+  thresholdValue.textContent = thresholdSlider.value;
+});
+
+resetBtn.addEventListener("click", async () => {
+  await fetch(`${API_BASE}/api/reset`, { method: "POST" });
+  totalImages = 0;
+  updateStats();
+  resultsEl.classList.add("hidden");
+  groupsContainer.innerHTML = "";
+  uniqueContainer.innerHTML = "";
+  fileInput.value = "";
+});
+
+analyzeBtn.addEventListener("click", () => analyze());
+
+// ---------- API calls ----------
+
+async function uploadFiles(fileList) {
+  const formData = new FormData();
+  for (const file of fileList) formData.append("images", file);
+
+  loadingEl.classList.remove("hidden");
+  try {
+    const res = await fetch(`${API_BASE}/api/upload`, {
+      method: "POST",
+      body: formData,
+    });
+    const data = await res.json();
+    totalImages += data.count;
+    updateStats();
+  } catch (err) {
+    alert("Upload failed. Is the backend running on http://localhost:5000 ?");
+    console.error(err);
+  } finally {
+    loadingEl.classList.add("hidden");
+  }
+}
+
+async function analyze() {
+  if (totalImages === 0) {
+    alert("Upload some images first.");
+    return;
+  }
+  loadingEl.classList.remove("hidden");
+  resultsEl.classList.add("hidden");
+
+  try {
+    const threshold = thresholdSlider.value;
+    const res = await fetch(`${API_BASE}/api/analyze?threshold=${threshold}`);
+    const data = await res.json();
+    renderResults(data);
+  } catch (err) {
+    alert("Analysis failed. Is the backend running?");
+    console.error(err);
+  } finally {
+    loadingEl.classList.add("hidden");
+  }
+}
+
+// ---------- Rendering ----------
+
+function updateStats() {
+  statsEl.textContent = `${totalImages} image${totalImages === 1 ? "" : "s"} loaded`;
+}
+
+function renderResults(data) {
+  resultsEl.classList.remove("hidden");
+  groupsContainer.innerHTML = "";
+  uniqueContainer.innerHTML = "";
+
+  summaryEl.innerHTML = `Analyzed <strong>${data.total_images}</strong> images —
+    found <strong>${data.total_duplicate_groups}</strong> duplicate group(s),
+    <strong>${data.unique_images.length}</strong> unique image(s).`;
+
+  data.duplicate_groups.forEach((group, idx) => {
+    groupsContainer.appendChild(renderGroupCard(group, idx));
+  });
+
+  if (data.unique_images.length) {
+    uniqueTitle.style.display = "block";
+    data.unique_images.forEach((img) => {
+      uniqueContainer.appendChild(renderThumb(img));
+    });
+  } else {
+    uniqueTitle.style.display = "none";
+  }
+}
+
+function renderGroupCard(group, idx) {
+  const card = document.createElement("div");
+  card.className = "group-card";
+
+  const badgeClass = group.has_exact_duplicate ? "badge-exact" : "badge-near";
+  const badgeText = group.has_exact_duplicate ? "Exact Duplicate" : "Near Duplicate";
+
+  card.innerHTML = `
+    <div class="group-head">
+      <div>
+        <strong>Group ${idx + 1}</strong>
+        <span class="group-meta"> — ${group.count} images</span>
+      </div>
+      <div>
+        <span class="badge ${badgeClass}">${badgeText}</span>
+        <span class="group-meta"> ${group.max_similarity}% similar</span>
+      </div>
+    </div>
+    <div class="image-row"></div>
+  `;
+
+  const row = card.querySelector(".image-row");
+  group.images.forEach((img) => row.appendChild(renderThumb(img)));
+
+  return card;
+}
+
+function renderThumb(img) {
+  const wrap = document.createElement("div");
+  wrap.className = "thumb";
+  wrap.innerHTML = `
+    <img src="${API_BASE}${img.url}" alt="${img.original_name}" />
+    <div class="thumb-name">${img.original_name}</div>
+  `;
+  return wrap;
+}
