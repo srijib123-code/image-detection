@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Duplicate Image Detector</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-icon">◆◇</span>
+      <span>Duplicate Image Detector</span>
+    </div>
+    <div class="stats" id="stats">0 images loaded</div>
+  </header>
+
+  <main>
+    <section class="upload-card">
+      <div id="dropZone" class="drop-zone">
+        <input type="file" id="fileInput" multiple accept="image/*" hidden />
+        <div class="drop-inner">
+          <div class="drop-icon">⇪</div>
+          <p><strong>Click to browse</strong> or drag & drop images here</p>
+          <p class="hint">PNG, JPG, GIF, BMP, WEBP supported</p>
+        </div>
+      </div>
+
+      <div class="controls">
+        <label class="threshold-label">
+          Similarity sensitivity
+          <input type="range" id="threshold" min="0" max="20" value="8" />
+          <span id="thresholdValue">8</span>
+        </label>
+        <div class="buttons">
+          <button id="analyzeBtn" class="btn btn-primary">Analyze for Duplicates</button>
+          <button id="resetBtn" class="btn btn-danger">Reset All</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="loading" class="loading hidden">
+      <div class="spinner"></div>
+      <span>Processing images…</span>
+    </section>
+
+    <section id="results" class="results hidden">
+      <div class="summary" id="summary"></div>
+      <div id="groupsContainer"></div>
+
+      <h3 class="section-title" id="uniqueTitle" style="display:none;">Unique Images</h3>
+      <div id="uniqueContainer" class="unique-grid"></div>
+    </section>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>
